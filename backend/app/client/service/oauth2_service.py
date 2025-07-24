@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+from datetime import timedelta
+from typing import Any
+
+from fast_captcha import text_captcha
+from fastapi import BackgroundTasks, Request, Response
+
+from backend.app.admin.conf import admin_settings
+from backend.app.client.crud.crud_user import crud_user_dao as user_dao
+from backend.app.client.crud.crud_user_social import user_social_dao
+from backend.app.client.schema.token import GetLoginToken
+from backend.app.client.schema.user import RegisterUserParam
+from backend.app.client.schema.user_social import CreateUserSocialParam
+from backend.common.enums import UserSocialType
+from backend.common.exception.errors import AuthorizationError
+from backend.common.security import jwt
+from backend.common.security.jwt import generate_default_password_hash, jwt_encode
+from backend.core.conf import settings
+from backend.database.db import async_db_session
+from backend.database.redis import redis_client
+from backend.utils.timezone import timezone
+
+
+class OAuth2Service:
+    """OAuth2 认证服务类"""
+
+    @staticmethod
+    async def create_user_with_login(
+        *,
+        request: Request,
+        response: Response,
+        background_tasks: BackgroundTasks,
+        user: dict[str, Any],
+        social: UserSocialType,
+    ) -> GetLoginToken | None:
+        async with async_db_session.begin() as db:
+            # 获取 OAuth2 平台用户信息
+            social_id = user.get('id')
+            social_username = user.get('username')
+            if social == UserSocialType.github:
+                social_username = user.get('login')
+            social_nickname = user.get('name')
+            social_email = user.get('email')
+            avatar = user.get('avatar_url')
+
+            if not social_email:
+                raise AuthorizationError(msg=f'授权失败，{social.value} 账户未绑定邮箱')
+            # 创建系统用户
+            sys_user = await user_dao.check_email(db, social_email)
+            if not sys_user:
+                sys_user = await user_dao.get_by_username(db, social_username)
+                if sys_user:
+                    social_username = f'{social_username}#{text_captcha(5)}'
+                sys_user = await user_dao.get_by_nickname(db, social_nickname)
+                if sys_user:
+                    social_username = f'{social_nickname}#{text_captcha(5)}'
+                new_sys_user = RegisterUserParam(
+                    username=social_username,
+                    password=generate_default_password_hash(),
+                    nickname=social_username,
+                    avatar=avatar,
+                    email=social_email,
+                )
+                await user_dao.create(db, new_sys_user, social=True)
+                await db.flush()
+                sys_user = await user_dao.check_email(db, social_email)
+            # 绑定社交用户
+            sys_user_id = sys_user.id
+            user_social = await user_social_dao.get(db, sys_user_id, social.value)
+            if not user_social:
+                new_user_social = CreateUserSocialParam(source=social.value, uid=str(social_id), user_id=sys_user_id)
+                await user_social_dao.create(db, new_user_social)
+
+            # 创建 token
+            expire = timezone.now() + timedelta(seconds=settings.TOKEN_EXPIRE_SECONDS)
+
+            access_token = jwt_encode({
+                'nickname': sys_user.nickname,
+                'avatar': sys_user.avatar,
+                'exp': expire,
+            })
+            await user_dao.update_login_time(db, sys_user.username)
+            await db.refresh(sys_user)
+            data = GetLoginToken(
+                access_token=access_token,
+                access_token_expire_time=expire,
+                user=sys_user,  # type: ignore
+                session_uuid='',
+            )
+            return data
+
+    @staticmethod
+    async def create_with_login(
+        *,
+        request: Request,
+        response: Response,
+        background_tasks: BackgroundTasks,
+        user: dict[str, Any],
+        social: UserSocialType,
+    ) -> GetLoginToken | None:
+        """
+        创建 OAuth2 用户并登录
+
+        :param request: FastAPI 请求对象
+        :param response: FastAPI 响应对象
+        :param background_tasks: FastAPI 后台任务
+        :param user: OAuth2 用户信息
+        :param social: 社交平台类型
+        :return:
+        """
+        async with async_db_session.begin() as db:
+            # 获取 OAuth2 平台用户信息
+            social_id = user.get('id')
+            social_username = user.get('username')
+            if social == UserSocialType.github:
+                social_username = user.get('login')
+            social_nickname = user.get('name')
+            social_email = user.get('email')
+            avatar = user.get('avatar_url')
+
+            if not social_email:
+                raise AuthorizationError(msg=f'授权失败，{social.value} 账户未绑定邮箱')
+            # 创建系统用户
+            sys_user = await user_dao.check_email(db, social_email)
+            if not sys_user:
+                sys_user = await user_dao.get_by_username(db, social_username)
+                if sys_user:
+                    social_username = f'{social_username}#{text_captcha(5)}'
+                sys_user = await user_dao.get_by_nickname(db, social_nickname)
+                if sys_user:
+                    social_username = f'{social_nickname}#{text_captcha(5)}'
+                new_sys_user = RegisterUserParam(
+                    username=social_username,
+                    password=generate_default_password_hash(),
+                    nickname=social_username,
+                    avatar=avatar,
+                    email=social_email,
+                )
+                await user_dao.create(db, new_sys_user, social=True)
+                await db.flush()
+                sys_user = await user_dao.check_email(db, social_email)
+            # 绑定社交用户
+            sys_user_id = sys_user.id
+            user_social = await user_social_dao.get(db, sys_user_id, social.value)
+            if not user_social:
+                new_user_social = CreateUserSocialParam(source=social.value, uid=str(social_id), user_id=sys_user_id)
+                await user_social_dao.create(db, new_user_social)
+            # 创建 token
+            access_token = await jwt.create_access_token(
+                str(sys_user_id),
+                sys_user.is_multi_login,
+                # extra info
+                username=sys_user.username,
+                nickname=sys_user.nickname,
+                avatar=sys_user.avatar,
+                last_login_time=timezone.t_str(timezone.now()),
+                ip=request.state.ip,
+                os=request.state.os,
+                browser=request.state.browser,
+                device=request.state.device,
+            )
+            refresh_token = await jwt.create_refresh_token(str(sys_user_id), multi_login=sys_user.is_multi_login)
+            await user_dao.update_login_time(db, sys_user.username)
+            await db.refresh(sys_user)
+            await redis_client.delete(f'{admin_settings.CAPTCHA_LOGIN_REDIS_PREFIX}:{request.state.ip}')
+            response.set_cookie(
+                key=settings.COOKIE_REFRESH_TOKEN_KEY,
+                value=refresh_token.refresh_token,
+                max_age=settings.COOKIE_REFRESH_TOKEN_EXPIRE_SECONDS,
+                expires=timezone.f_utc(refresh_token.refresh_token_expire_time),
+                httponly=True,
+            )
+            data = GetLoginToken(
+                access_token=access_token.access_token,
+                access_token_expire_time=access_token.access_token_expire_time,
+                user=sys_user,  # type: ignore
+                session_uuid=access_token.session_uuid,
+            )
+            return data
+
+
+oauth2_service: OAuth2Service = OAuth2Service()

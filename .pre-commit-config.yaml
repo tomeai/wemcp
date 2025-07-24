@@ -1,0 +1,19 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+
+  - repo: https://github.com/charliermarsh/ruff-pre-commit
+    rev: v0.11.2
+    hooks:
+      - id: ruff
+        args:
+          # https://github.com/astral-sh/ruff-pre-commit/issues/64
+          - '--config'
+          - 'backend/.ruff.toml'
+          - '--fix'
+          - '--unsafe-fixes'
+      - id: ruff-format
