@@ -1,0 +1,113 @@
+services:
+  wemcp_server:
+    image: wemcp_server:latest
+    container_name: wemcp_server
+    restart: always
+    depends_on:
+      - wemcp_postgres
+      - wemcp_redis
+      - wemcp_celery
+    volumes:
+      - ./deploy/backend/docker-compose/.env.server:/fba/backend/.env
+      - wemcp_static:/fba/backend/app/static
+      - wemcp_static_upload:/fba/backend/static/upload
+    networks:
+      - wemcp_network
+    command:
+      - bash
+      - -c
+      - |
+        wait-for-it -s wemcp_mysql:3306 -s wemcp_redis:6379 -t 300
+        supervisord -c /etc/supervisor/supervisord.conf
+        supervisorctl restart
+
+  wemcp_postgres:
+    image: postgres:17
+    ports:
+      - "${DOCKER_POSTGRES_MAP_PORT:-5432}:5432"
+    container_name: wemcp_postgres
+    restart: always
+    environment:
+      POSTGRES_DB: fba
+      POSTGRES_PASSWORD: 123456
+      TZ: Asia/Shanghai
+    volumes:
+      - wemcp_postgres:/var/lib/postgresql/data
+    networks:
+      - wemcp_network
+
+  wemcp_redis:
+    image: redis
+    ports:
+      - "${DOCKER_REDIS_MAP_PORT:-6379}:6379"
+    container_name: wemcp_redis
+    restart: always
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      - wemcp_redis:/data
+    networks:
+      - wemcp_network
+
+  wemcp_ui:
+    image: wemcp_ui:latest
+    ports:
+      - "80:80"
+    container_name: wemcp_ui
+    restart: always
+    depends_on:
+      - wemcp_server
+    command:
+      - nginx
+      - -g
+      - daemon off;
+    volumes:
+      # - local_ssl_pem_path:/etc/ssl/xxx.pem
+      # - local_ssl_key_path:/etc/ssl/xxx.key
+      - wemcp_static:/www/wemcp_server/backend/static
+    networks:
+      - wemcp_network
+
+  wemcp_celery:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - SERVER_TYPE=celery
+    image: wemcp_celery:latest
+    ports:
+      - "8555:8555"
+    container_name: wemcp_celery
+    restart: always
+    depends_on:
+      - wemcp_rabbitmq
+    volumes:
+      - ./deploy/backend/docker-compose/.env.server:/fba/backend/.env
+    networks:
+      - wemcp_network
+    command:
+      - bash
+      - -c
+      - |
+        wait-for-it -s wemcp_rabbitmq:5672 -t 300
+        supervisord -c /etc/supervisor/supervisord.conf
+        supervisorctl restart
+
+networks:
+  wemcp_network:
+    name: wemcp_network
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.10.10.0/24
+
+volumes:
+  wemcp_mysql:
+    name: wemcp_mysql
+  wemcp_redis:
+    name: wemcp_redis
+  wemcp_static:
+    name: wemcp_static
+  wemcp_static_upload:
+    name: wemcp_static_upload

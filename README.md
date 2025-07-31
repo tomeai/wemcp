@@ -40,6 +40,12 @@
 1. 将前台和后台公用的model进行抽离
 ```
 
+## 参考
+
+```
+https://github.com/fastapi-practices/fastapi_best_architecture
+```
+
 ## jwt
 
 ```
