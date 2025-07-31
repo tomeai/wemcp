@@ -41,7 +41,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           push: false
-          context: "{{defaultContext}}:${{ matrix.context }}"
+          context: .
           file: "${{ matrix.file }}"
           platforms: ${{ matrix.platform }}
           cache-from: type=gha
